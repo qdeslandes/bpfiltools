@@ -1,44 +1,70 @@
-IPT_SRC_DIR=
-IPT_INSTALL_DIR=
+-include $(CURDIR)/.env
 
-BF_SRC_DIR=
-BF_BUILD_DIR=$(BF_SRC_DIR)/build
-BF_INSTALL_DIR=
+ifndef BF_SRC_DIR
+$(error BF_SRC_DIR is not set in .env)
+endif
 
-ipt_build:
-	cd $(IPT_SRC_DIR) && ./autogen.sh
-	cd $(IPT_SRC_DIR) && PKG_CONFIG_PATH=$(BF_INSTALL_DIR)/usr/share/pkgconfig ./configure \
+ifndef IPT_SRC_DIR
+$(error IPT_SRC_DIR is not set in .env)
+endif
+
+BUILD_DIR = $(CURDIR)/build
+INSTALL_DIR = $(BUILD_DIR)/root
+
+BF_BUILD_TYPE ?= release
+BF_RUN_FLAGS ?= --transient --verbose
+BF_BUILD_DIR = $(BUILD_DIR)/bpfilter.$(BF_BUILD_TYPE)
+BF_INSTALL_DIR = $(INSTALL_DIR)/bpfilter.$(BF_BUILD_TYPE)
+
+IPT_BUILD_DIR = $(BUILD_DIR)/iptables
+IPT_INSTALL_DIR = $(INSTALL_DIR)/iptables
+
+bf: bf.debug bf.release
+bf.debug: override BF_BUILD_TYPE = debug
+bf.debug: bf.install bf.check
+bf.release: override BF_BUILD_TYPE = release
+bf.release: bf.install bf.check
+
+bf.configure:
+	cmake \
+		-S $(BF_SRC_DIR) \
+		-B $(BF_BUILD_DIR) \
+		-DCMAKE_BUILD_TYPE=$(BF_BUILD_TYPE) \
+		-DCMAKE_INSTALL_PREFIX=$(BF_INSTALL_DIR)/usr
+
+bf.build: bf.configure
+	$(MAKE) -C $(BF_BUILD_DIR) -j $(shell nproc)
+
+bf.check: bf.build ipt.install
+	$(MAKE) -C $(BF_BUILD_DIR) checkstyle
+	$(MAKE) -C $(BF_BUILD_DIR) test
+	PATH=$(BF_INSTALL_DIR)/usr/bin:$(IPT_INSTALL_DIR)/sbin:$(PATH) $(MAKE) -C $(BF_BUILD_DIR) e2e
+
+bf.install: bf.build
+	$(MAKE) -C $(BF_BUILD_DIR) install
+
+bf.run: bf.build
+	sudo $(BF_BUILD_DIR)/src/bpfilter $(BF_RUN_FLAGS)
+
+bf.reset:
+	-sudo rm -rf /run/bpfilter.sock
+	-sudo rm -rf /run/bpfilter.blob
+	-sudo sh -c 'rm /sys/fs/bpf/bpfltr_*'
+
+ipt: ipt.install
+
+ipt.configure: override BF_BUILD_TYPE = release
+ipt.configure: bf.install
+	rsync -avu --delete $(IPT_SRC_DIR) $(BUILD_DIR)
+	cd $(IPT_BUILD_DIR) && ./autogen.sh
+	cd $(IPT_BUILD_DIR) && PKG_CONFIG_PATH=$(BF_INSTALL_DIR)/usr/share/pkgconfig ./configure \
 		--prefix=$(IPT_INSTALL_DIR) \
 		--disable-nftables \
 		--enable-libipq \
 		--enable-bpfilter
-	cd $(IPT_SRC_DIR) && make -j
 
-ipt_install:
-	$(MAKE) -C $(IPT_SRC_DIR) install
+ipt.build: ipt.configure
+	$(MAKE) -C $(IPT_BUILD_DIR)
 
-bf_build:
-	cmake -B $(BF_BUILD_DIR) -S $(BF_SRC_DIR) -DCMAKE_BUILD_TYPE=release
-	$(MAKE) -C $(BF_BUILD_DIR) -j
-
-bf_install: export INSTALL_DIR=$(BF_INSTALL_DIR)
-bf_install: bf_build
-	install -D $(BF_BUILD_DIR)/lib/libbpfilter.so $(BF_INSTALL_DIR)/usr/lib64/libbpfilter.so
-	install -D $(BF_BUILD_DIR)/lib/libbpfilter.a $(BF_INSTALL_DIR)/usr/lib64/libbpfilter.a
-	install -D $(BF_BUILD_DIR)/src/bpfilter $(BF_INSTALL_DIR)/usr/bin/bpfilter
-
-	rsync -a $(BF_SRC_DIR)/lib/include/ $(BF_INSTALL_DIR)/usr/include/
-	rsync -a $(BF_SRC_DIR)/shared/include/ $(BF_INSTALL_DIR)/usr/include/
-
-	install -D $(CURDIR)/bpfilter.pc.template $(BF_INSTALL_DIR)/usr/share/pkgconfig/bpfilter.pc
-	echo $(BF_INSTALL_DIR)
-	envsubst '$${INSTALL_DIR}' < $(CURDIR)/bpfilter.pc.template > $(BF_INSTALL_DIR)/usr/share/pkgconfig/bpfilter.pc
-
-	tree $(BF_INSTALL_DIR)
-
-bf_run:
-	sudo $(BF_INSTALL_DIR)/usr/bin/bpfilter
-
-bf_clean:
-	sudo rm -rf /run/bpfilter.sock
-	sudo rm -rf /run/bpfilter.blob
+ipt.install: ipt.build
+	$(MAKE) -C $(IPT_BUILD_DIR) install
