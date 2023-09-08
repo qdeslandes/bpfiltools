@@ -19,11 +19,17 @@ BF_INSTALL_DIR = $(INSTALL_DIR)/bpfilter.$(BF_BUILD_TYPE)
 IPT_BUILD_DIR = $(BUILD_DIR)/iptables
 IPT_INSTALL_DIR = $(INSTALL_DIR)/iptables
 
-bf: bf.debug bf.release
+# This target explicitly calls bf.debug and bf.release, as setting those as
+# dependencies of bf wouldn't work: once the first one completes, make
+# assumes bf.check (which bf.debug and bf.release depends on) is up to date,
+# and doesn't run it again.
+bf:
+	$(MAKE) -C $(CURDIR) bf.debug
+	$(MAKE) -C $(CURDIR) bf.release
+
 bf.debug: override BF_BUILD_TYPE = debug
-bf.debug: bf.install bf.check
 bf.release: override BF_BUILD_TYPE = release
-bf.release: bf.install bf.check
+bf.release bf.debug: bf.check
 
 bf.configure:
 	cmake \
