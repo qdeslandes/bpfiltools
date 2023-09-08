@@ -27,11 +27,12 @@ Finally, you can build, test, and run `bpfilter` and `iptables`:
 - `bf.run`: run `bpfilter` with `--transient` and `--verbose` flags. Use `BF_RUN_FLAGS` to override default flags.
 - `bf.reset`: remove all `bpfilter` artefacts: socket file, serialised context, and pinned BPF programs.
 - `ipt`: build `iptables`, and install it.
+- `ipt.fetch`: copy `iptables` sources into the build directory. `iptables` doesn't support out-of-tree build, due to autotools.
 - `ipt.configure`: configure `iptables` (using `autogen.sh` and `./configure`).
 - `ipt.build`: build `iptables`.
 - `ipt.install`: install `iptables`.
 
-Unless specific otherwise, all targets will build `bpfilter` in 'release' mode. You can use `BF_BUILD_TYPE` variable to build in 'debug' mode (with debug symbols and sanitisers):
+Unless specific otherwise, all targets will build in 'release' mode. You can use `BUILD_TYPE` variable to build in 'debug' mode (with debug symbols and sanitisers):
 ```shell
-make bf.build BF_BUILD_TYPE=debug
+make bf BUILD_TYPE=debug
 ```
