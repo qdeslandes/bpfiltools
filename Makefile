@@ -9,7 +9,7 @@ $(error IPT_SRC_DIR is not set in .env)
 endif
 
 BUILD_TYPE ?= release
-BUILD_DIR = $(CURDIR)/build
+BUILD_DIR ?= $(CURDIR)/build
 INSTALL_DIR = $(BUILD_DIR)/root
 
 BF_RUN_FLAGS ?= --transient --verbose
