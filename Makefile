@@ -19,9 +19,6 @@ BF_INSTALL_DIR = $(INSTALL_DIR)/bpfilter.$(BUILD_TYPE)
 IPT_BUILD_DIR = $(BUILD_DIR)/iptables.$(BUILD_TYPE)
 IPT_INSTALL_DIR = $(INSTALL_DIR)/iptables.$(BUILD_TYPE)
 
-CI_BF_REF ?= origin/main
-CI_IPT_REF ?= origin/bpfilter
-
 # This target explicitly calls bf.debug and bf.release, as setting those as
 # dependencies of bf wouldn't work: once the first one completes, make
 # assumes bf.check (which bf.debug and bf.release depends on) is up to date,
@@ -86,12 +83,6 @@ $(IPT_BUILD_DIR)/iptables/xtables-legacy-multi: $(IPT_BUILD_DIR)/Makefile
 ipt.install: $(IPT_INSTALL_DIR)/sbin/iptables
 $(IPT_INSTALL_DIR)/sbin/iptables: $(IPT_BUILD_DIR)/iptables/xtables-legacy-multi
 	$(MAKE) -C $(IPT_BUILD_DIR) install
-
-ci: mrproper mrproper ci.checkout bf
-
-ci.checkout:
-	$(CURDIR)/scripts/checkout.sh -r $(BF_SRC_DIR) -g $(CI_BF_REF)
-	$(CURDIR)/scripts/checkout.sh -r $(IPT_SRC_DIR) -g $(CI_IPT_REF)
 
 mrproper:
 	-rm -rf $(BUILD_DIR)

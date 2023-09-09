@@ -31,8 +31,6 @@ Finally, you can build, test, and run `bpfilter` and `iptables`:
   - `ipt.configure`: configure `iptables` (using `autogen.sh` and `./configure`).
   - `ipt.build`: build `iptables`.
   - `ipt.install`: install `iptables`.
-- `ci`: clean build artefact, then build `bpfilter` and `iptables` from scratch in 'debug' and 'release' mode, and run checks. Useful to quickly test `bpfilter` and ensure it works as expected (from build to end-to-end tests).
-  - `ci.checkout`: checkout `bpfilter` repository to the git reference `CI_BF_REF` and `iptables` repository to the git reference `CI_IPT_REF`. Default values are respectively `origin/main` and `origin/bpfilter`.
 - `mrproper`: remove the build folder.
 
 Unless specific otherwise, all targets will build in 'release' mode. You can use `BUILD_TYPE` variable to build in 'debug' mode (with debug symbols and sanitisers):
