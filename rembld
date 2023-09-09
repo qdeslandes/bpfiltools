@@ -1,0 +1,550 @@
+#!/usr/bin/python3
+
+import argparse
+import concurrent.futures
+import json
+import os
+import pathlib
+import rich
+import rich.progress
+import subprocess
+import traceback
+import typing
+import uuid
+
+progress = rich.progress.Progress(
+    rich.progress.SpinnerColumn(),
+    rich.progress.TextColumn("[bold blue]{task.fields[hostname]}", justify="right"),
+    rich.progress.TextColumn("[yellow]{task.fields[build_type]:7}", justify="right"),
+    rich.progress.TextColumn("[grey]{task.fields[target]:13}", justify="right"),
+    rich.progress.BarColumn(bar_width=None),
+    rich.progress.TimeElapsedColumn(),
+    "[progress.percentage]{task.percentage:>3.1f}%",
+    rich.progress.TextColumn("[bold yellow]{task.fields[status]}"),
+)
+
+
+def validate_file_path(filepath: str) -> pathlib.Path:
+    """Check if a file path is valid.
+
+    Args:
+        filepath (str): file path to check.
+
+    Returns:
+        pathlib.Path: the file path, as a pathlib.Path object.
+    """
+
+    path = pathlib.Path(filepath).resolve()
+
+    if not path.is_file():
+        raise argparse.ArgumentTypeError(f"{filepath} is not a valid file path!")
+
+    return path
+
+
+def load_config(config_path: pathlib.Path) -> dict[str, typing.Any]:
+    """Load rembld configuration from a JSON file.
+
+    Args:
+        config_path (pathlib.Path): path to the configuration file. Must be a
+            valid JSON file.
+
+    Returns:
+        dict[str, typing.Any]: configuration, as a Python dictionnary.
+    """
+
+    raw = json.load(config_path.open("r", encoding="utf-8"))
+
+    if "logs-dir" in raw:
+        raw["logs-dir"] = pathlib.Path(raw["logs-dir"]).resolve()
+
+    return raw
+
+
+class Configuration:
+    """Configuration for rembld.
+
+    The configuration contains default values which can be overriden by the
+    configuration file and command line arguments.
+
+    Args:
+        args: parsed command line arguments.
+    """
+
+    def __init__(self, args: argparse.Namespace) -> None:
+        self._config = {
+            "logs-dir": pathlib.Path(".").resolve(),
+            "jobs": 1,
+            "bf": {
+                "repo": "https://github.com/facebook/bpfilter.git",
+                "ref": "main",
+            },
+            "ipt": {
+                "repo": "https://github.com/qdeslandes/iptables.git",
+                "ref": "bpfilter",
+            },
+            "bftools": {
+                "repo": "git@github.com:qdeslandes/bpfiltools.git",
+                "ref": "main",
+            },
+            "hosts": [],
+        }
+
+        if args.config:
+            config_override = load_config(args.config)
+
+            if "logs-dir" in config_override:
+                self._config["logs-dir"] = config_override["logs-dir"]
+            if "jobs" in config_override:
+                self._config["jobs"] = config_override["jobs"]
+
+            self._config["bf"].update(config_override.get("bf", {}))
+            self._config["ipt"].update(config_override.get("ipt", {}))
+            self._config["bftools"].update(config_override.get("bftools", {}))
+            self._config["hosts"] += config_override.get("hosts", [])
+
+        if args.logs_dir:
+            self._config["logs-dir"] = args.logs_dir
+        if args.jobs:
+            self._config["jobs"] = args.jobs
+        if args.bf_repo:
+            self._config["bf"]["repo"] = args.bf_repo
+        if args.bf_ref:
+            self._config["bf"]["ref"] = args.bf_ref
+        if args.ipt_repo:
+            self._config["ipt"]["repo"] = args.ipt_repo
+        if args.ipt_ref:
+            self._config["ipt"]["ref"] = args.ipt_ref
+        if args.bftools_repo:
+            self._config["bftools"]["repo"] = args.bftools_repo
+        if args.bftools_ref:
+            self._config["bftools"]["ref"] = args.bftools_ref
+        if args.hosts:
+            self._config["hosts"] += args.hosts
+
+        # Remove duplicate hosts
+        self._config["hosts"] = list(set(self._config["hosts"]))
+
+        # Create logs directory if it doesn't exist
+        os.makedirs(self._config["logs-dir"], exist_ok=True)
+
+    def __str__(self) -> str:
+        """Return a string representation of the configuration.
+
+        pathlib.Path are not serializable, so we convert them to strings.
+
+        Returns:
+            str: a string representation of the configuration.
+        """
+
+        config = self._config.copy()
+        config["logs-dir"] = str(config["logs-dir"])
+
+        return json.dumps(config, indent=4)
+
+    def __getitem__(self, key: str) -> typing.Any:
+        """Get a configuration value.
+
+        Args:
+            key (str): configuration key.
+
+        Returns:
+            typing.Any: configuration value.
+        """
+
+        return self._config[key]
+
+
+class Command:
+    """A command.
+
+    Args:
+        cmd (list[str]): command to run.
+    """
+
+    def __init__(self, cmd: list[str]) -> None:
+        self._cmd = cmd
+
+    def get(self) -> list[str]:
+        """Get the command to run.
+
+        Returns:
+            list[str]: the command to run.
+        """
+
+        return [str(cmd) for cmd in self._cmd]
+
+    def __str__(self) -> str:
+        """Return a string representation of the command.
+
+        Returns:
+            str: a string representation of the command.
+        """
+
+        return " ".join(self.get())
+
+
+class RemoteCommand(Command):
+    """A command to run on a remote host.
+
+    Args:
+        hostname (str): hostname of the remote host.
+        cmd (list[str]): command to run.
+    """
+
+    def __init__(self, hostname: str, cmd: list[str]) -> None:
+        super().__init__(cmd)
+        self._hostname = hostname
+
+    def get(self) -> list[str]:
+        """Get the command to run.
+
+        Returns:
+            list[str]: the command to run.
+        """
+
+        return [
+            "ssh",
+            "-o",
+            "StrictHostKeyChecking=no",
+            self._hostname,
+            *(super().get()),
+        ]
+
+    def get_local(self) -> list[str]:
+        """Get the local command, without the SSH invocation.
+
+        Returns:
+            list[str]: the command to run locally.
+        """
+
+        return super().get()
+
+    @property
+    def hostname(self) -> str:
+        """Remote host name"""
+
+        return self._hostname
+
+
+class RemoteMakeCommand(RemoteCommand):
+    """A make command to run on a remote host.
+
+    Args:
+        hostname (str): hostname of the remote host.
+        target (str): make target to run.
+        makefile_dir (pathlib.Path): directory containing the Makefile.
+        opts (dict[str, typing.Any]): make options.
+    """
+
+    def __init__(
+        self,
+        hostname: str,
+        target: str,
+        makefile_dir: pathlib.Path,
+        opts: dict[str, typing.Any] = [],
+    ) -> None:
+        self._target = target
+        self._makefile_dir = makefile_dir
+        self._opts = opts
+
+        cmd = [
+            "make",
+            "-C",
+            str(makefile_dir),
+            target,
+            *[f"{k}={v}" for k, v in opts.items()],
+        ]
+
+        super().__init__(hostname, cmd)
+
+    @property
+    def target(self) -> str:
+        """Make target to run."""
+
+        return self._target
+
+    @property
+    def build_type(self) -> str:
+        """Build type."""
+
+        return self._opts.get("BUILD_TYPE", "")
+
+
+class ProgressLogger:
+    """A job progress logger, to use with rich.progress.Progress.
+
+    Args:
+        task_id (rich.progress.TaskID): task ID to update.
+        hostname (str): hostname of the remote host.
+    """
+
+    def __init__(self, task_id: rich.progress.TaskID, hostname: str) -> None:
+        self._task_id = task_id
+        self._hostname = hostname
+
+    def start(self) -> None:
+        """Notify the job has started.
+
+        Notify rich.progress.Progress that the job has started, and update the
+        task status to "Started".
+        """
+
+        progress.start_task(self._task_id)
+        progress.console.log(f"{self._hostname}: started")
+        progress.update(self._task_id, status="Started")
+
+    def run(self, cmd: Command) -> None:
+        """Notify a command will be run.
+
+        Log the command to run, and update the task status to "Running".
+
+        Args:
+            cmd (Command): command to run.
+        """
+
+        progress.console.log(f"{self._hostname}: running '{' '.join(cmd.get_local())}'")
+        progress.update(
+            self._task_id,
+            status="Running",
+            target=f"{getattr(cmd, 'target', '')}",
+            build_type=f"{getattr(cmd, 'build_type', '')}",
+        )
+
+    def failed(self, cmd: Command) -> None:
+        """Notify that the job has failed.
+
+        Args:
+            cmd (Command): command that failed.
+        """
+
+        progress.console.log(f"{self._hostname}: [bold red]failed!")
+        progress.update(
+            self._task_id,
+            status="[bold red]Failed",
+            target=f"[bold red]{getattr(cmd, 'target', '')}",
+            build_type=f"[bold red]{getattr(cmd, 'build_type', '')}",
+        )
+        progress.stop_task(self._task_id)
+
+    def done(self) -> None:
+        """Notify that the job is done."""
+
+        progress.console.log(f"{self._hostname}: done")
+        progress.update(self._task_id, status="[bold green]Done")
+
+
+class Job:
+    """A job to run on a remote host.
+
+    Args:
+        hostname (str): hostname of the remote host.
+        config (Configuration): rembld configuration.
+    """
+
+    @staticmethod
+    def get_build_commands(
+        hostname: str, makefile_dir: pathlib.Path, opts: dict[str, typing.Any]
+    ) -> list[RemoteMakeCommand]:
+        """Get the build commands to run.
+
+        Args:
+            hostname (str): hostname of the remote host.
+            makefile_dir (pathlib.Path): directory containing the Makefile.
+            opts (dict[str, typing.Any]): make options.
+
+        Returns:
+            list[RemoteMakeCommand]: the build commands to run.
+        """
+
+        return [
+            RemoteMakeCommand(hostname, "bf.configure", makefile_dir, opts),
+            RemoteMakeCommand(hostname, "bf.build", makefile_dir, opts),
+            RemoteMakeCommand(hostname, "bf.install", makefile_dir, opts),
+            RemoteMakeCommand(hostname, "ipt.fetch", makefile_dir, opts),
+            RemoteMakeCommand(hostname, "ipt.configure", makefile_dir, opts),
+            RemoteMakeCommand(hostname, "ipt.build", makefile_dir, opts),
+            RemoteMakeCommand(hostname, "ipt.install", makefile_dir, opts),
+            RemoteMakeCommand(hostname, "bf.check", makefile_dir, opts),
+        ]
+
+    def __init__(self, hostname: str, config: Configuration) -> None:
+        self._hostname = hostname
+        self._workdir = pathlib.Path("/tmp") / str(uuid.uuid4())
+        self._logfile = open(config["logs-dir"] / f"{hostname}.log", "w")
+
+        self._commands = [
+            RemoteCommand(self._hostname, ["mkdir", "-p", self._workdir]),
+            RemoteCommand(
+                self._hostname,
+                [
+                    "git",
+                    "clone",
+                    "--depth",
+                    1,
+                    "--branch",
+                    config["bf"]["ref"],
+                    config["bf"]["repo"],
+                    self._workdir / "bf",
+                ],
+            ),
+            RemoteCommand(
+                self._hostname,
+                [
+                    "git",
+                    "clone",
+                    "--depth",
+                    1,
+                    "--branch",
+                    config["ipt"]["ref"],
+                    config["ipt"]["repo"],
+                    self._workdir / "ipt",
+                ],
+            ),
+            RemoteCommand(
+                self._hostname,
+                [
+                    "git",
+                    "clone",
+                    "--depth",
+                    1,
+                    "--branch",
+                    config["bftools"]["ref"],
+                    config["bftools"]["repo"],
+                    self._workdir / "bftools",
+                ],
+            ),
+        ]
+
+        all_opts = {
+            "BF_BUILD_DIR": self._workdir / "build",
+            "BF_SRC_DIR": self._workdir / "bf",
+            "IPT_SRC_DIR": self._workdir / "ipt",
+        }
+        all_opts["BUILD_TYPE"] = "debug"
+        self._commands += Job.get_build_commands(
+            self._hostname, self._workdir / "bftools", all_opts
+        )
+        all_opts["BUILD_TYPE"] = "release"
+        self._commands += Job.get_build_commands(
+            self._hostname, self._workdir / "bftools", all_opts
+        )
+
+        self._task_id = progress.add_task(
+            self._hostname,
+            total=len(self._commands),
+            hostname=self._hostname,
+            status="Pending",
+            start=False,
+            target="",
+            build_type="",
+        )
+        self._logger = ProgressLogger(self._task_id, self._hostname)
+
+    def _run_cmd(self, cmd: RemoteCommand) -> None:
+        """Run a command on the remote target.
+
+        Args:
+            cmd (RemoteCommand): command to run.
+        """
+
+        self._logger.run(cmd)
+        subprocess.run(
+            cmd.get(), check=True, stdout=self._logfile, stderr=self._logfile
+        )
+
+        progress.advance(self._task_id)
+
+    def run(self) -> None:
+        """Run the job on the remote target."""
+
+        self._logger.start()
+
+        try:
+            for cmd in self._commands:
+                self._run_cmd(cmd)
+        except Exception as e:
+            self._logfile.write(str(e))
+            traceback.print_exc(file=self._logfile)
+            self._logger.failed(cmd)
+            return
+
+        self._logger.done()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Run bpfilter build and tests on 1+ remote hosts."
+    )
+    parser.add_argument(
+        "-c",
+        "--config",
+        type=validate_file_path,
+        help="rembld configuration file, in JSON format.",
+    )
+    parser.add_argument(
+        "-l",
+        "--logs-dir",
+        dest="logs_dir",
+        help="Directory to store build log files in. Logs files are named after the hostname.",
+    )
+    parser.add_argument(
+        "-j", "--jobs", type=int, help="Number of jobs to run in parallel."
+    )
+    parser.add_argument(
+        "--bf-repo",
+        type=str,
+        dest="bf_repo",
+        help="Repository to clone bpfilter.",
+    )
+    parser.add_argument(
+        "--bf-ref",
+        type=str,
+        dest="bf_ref",
+        help="Reference to checkout for bpfilter.",
+    )
+    parser.add_argument(
+        "--ipt-repo",
+        type=str,
+        dest="ipt_repo",
+        help="Repository to clone iptables.",
+    )
+    parser.add_argument(
+        "--ipt-ref",
+        type=str,
+        dest="ipt_ref",
+        help="Reference to checkout for iptables.",
+    )
+    parser.add_argument(
+        "--bftools-repo",
+        type=str,
+        dest="bftools_repo",
+        help="Repository to clone bpfiltools.",
+    )
+    parser.add_argument(
+        "--bftools-ref",
+        type=str,
+        dest="bftools_ref",
+        help="Reference to checkout for bpfiltools.",
+    )
+    parser.add_argument(
+        "hosts",
+        metavar="HOST",
+        nargs="*",
+        help="Hosts to run the builds on.",
+    )
+
+    args = parser.parse_args()
+    c = Configuration(args)
+    jobs = [Job(hostname, c) for hostname in c["hosts"]]
+
+    progress.console.print(rich.panel.Panel(f"[blue]{c}", title="Configuration"))
+
+    with progress:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as pool:
+            for job in jobs:
+                pool.submit(job.run)
+
+
+if __name__ == "__main__":
+    main()

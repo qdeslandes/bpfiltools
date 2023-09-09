@@ -37,3 +37,9 @@ Unless specific otherwise, all targets will build in 'release' mode. You can use
 ```shell
 make bf BUILD_TYPE=debug
 ```
+
+### `rembld`
+
+`rembld` is a tool used to build `bpfilter` on a remote host. It will clone `bpfilter` sources and `iptables` from a given Git reference, then build and test `bpfilter`.
+
+See `rembld --help` for usage details.
